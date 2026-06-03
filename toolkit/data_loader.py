@@ -389,6 +389,7 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             dataset_config: 'DatasetConfig',
             batch_size=1,
             sd: 'StableDiffusion' = None,
+            setup: bool = True,
     ):
         self.dataset_config = dataset_config
         # update bucket divisibility
@@ -586,7 +587,8 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             else:
                 print_acc(f"  -  Found {len(self.file_list)} images after adding flips")
 
-        self.setup_epoch()
+        if setup:
+            self.setup_epoch()
 
     def setup_epoch(self):
         if self.epoch_num == 0:

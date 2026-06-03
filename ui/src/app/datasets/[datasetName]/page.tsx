@@ -26,7 +26,7 @@ export default function DatasetPage({ params }: { params: { datasetName: string 
   const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null);
   const scrollParentCallback = useCallback((el: HTMLDivElement | null) => setScrollParent(el), []);
 
-  const refreshImageList = (dbName: string) => {
+  const refreshImageList = useCallback((dbName: string) => {
     setStatus('loading');
     apiClient
       .post('/api/datasets/listImages', { datasetName: dbName })
@@ -40,10 +40,22 @@ export default function DatasetPage({ params }: { params: { datasetName: string 
         console.error('Error fetching images:', error);
         setStatus('error');
       });
-  };
-  useOpenImagesModalOnDrag(datasetName, () => refreshImageList(datasetName));
+  }, []);
 
   const imgPaths = useMemo(() => imgList.map(img => img.img_path), [imgList]);
+
+  const handleFilesAdded = useCallback(() => {
+    setCaptionRefreshKeys(prev => {
+      const next = { ...prev };
+      for (const imgPath of imgPaths) {
+        next[imgPath] = (next[imgPath] || 0) + 1;
+      }
+      return next;
+    });
+    refreshImageList(datasetName);
+  }, [datasetName, imgPaths, refreshImageList]);
+
+  useOpenImagesModalOnDrag(datasetName, handleFilesAdded);
 
   useEffect(() => {
     if (datasetName) {
@@ -124,7 +136,7 @@ export default function DatasetPage({ params }: { params: { datasetName: string 
           />
           <Button
             className="text-white bg-slate-600 px-2 sm:px-3 py-1 rounded-md text-sm sm:text-base whitespace-nowrap"
-            onClick={() => openImagesModal(datasetName, () => refreshImageList(datasetName))}
+            onClick={() => openImagesModal(datasetName, handleFilesAdded)}
           >
             <span className="sm:hidden">+ Add</span>
             <span className="hidden sm:inline">Add Images</span>

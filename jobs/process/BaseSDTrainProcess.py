@@ -25,7 +25,7 @@ from toolkit.memory_management import MemoryManager
 from toolkit.basic import value_map
 from toolkit.clip_vision_adapter import ClipVisionAdapter
 from toolkit.custom_adapter import CustomAdapter
-from toolkit.data_loader import get_dataloader_from_datasets, trigger_dataloader_setup_epoch
+from toolkit.data_loader import AiToolkitDataset, get_dataloader_from_datasets, trigger_dataloader_setup_epoch
 from toolkit.data_transfer_object.data_loader import FileItemDTO, DataLoaderBatchDTO
 from toolkit.ema import ExponentialMovingAverage
 from toolkit.embedding import Embedding
@@ -793,6 +793,73 @@ class BaseSDTrainProcess(BaseTrainProcess):
     
     def hook_after_sd_init_before_load(self):
         pass
+
+    def is_text_encoder_required_after_cached_dataset_load(self):
+        if self.train_config.train_text_encoder:
+            return True, "train_text_encoder is enabled"
+        if self.embed_config is not None:
+            return True, "embedding training needs text encoder token embeddings"
+        if self.decorator_config is not None:
+            return True, "decorator training encodes prompt embeddings"
+        if self.adapter_config is not None:
+            return True, "adapter setup may need text encoder conditioning"
+        if self.guidance_config is not None:
+            return True, "guidance config needs prompt encoding"
+        if self.train_config.do_cfg:
+            return True, "CFG training needs unconditional prompt embeddings"
+        if self.train_config.do_guidance_loss:
+            return True, "guidance loss needs unconditional prompt embeddings"
+        if self.train_config.blank_prompt_preservation:
+            return True, "blank prompt preservation needs blank prompt embeddings"
+        if self.train_config.diff_output_preservation:
+            return True, "differential output preservation needs class prompt embeddings"
+        if not self.train_config.disable_sampling:
+            return True, "sampling needs prompt embeddings"
+        return False, None
+
+    def are_text_embedding_caches_complete(self, sd: StableDiffusion):
+        if not self.is_caching_text_embeddings:
+            return False
+
+        dataset_configs = []
+        if self.datasets is not None:
+            dataset_configs.extend(self.datasets)
+        if self.datasets_reg is not None:
+            dataset_configs.extend(self.datasets_reg)
+        if len(dataset_configs) == 0:
+            return False
+
+        with self.accelerator.main_process_first():
+            for dataset_config in dataset_configs:
+                dataset = AiToolkitDataset(
+                    dataset_config,
+                    batch_size=self.train_config.batch_size,
+                    sd=sd,
+                    setup=False,
+                )
+                for file_item in dataset.file_list:
+                    text_embedding_path = file_item.get_text_embedding_path(recalculate=True)
+                    if not os.path.exists(text_embedding_path):
+                        return False
+        return True
+
+    def maybe_skip_text_encoder_load_for_cached_embeddings(self):
+        if self.sd.__class__ is not StableDiffusion or not self.sd.is_flux:
+            return
+        if not self.is_caching_text_embeddings:
+            return
+
+        requires_text_encoder, reason = self.is_text_encoder_required_after_cached_dataset_load()
+        if requires_text_encoder:
+            print_acc(f"Text embedding cache preflight: keeping text encoder loaded because {reason}.")
+            return
+
+        if not self.are_text_embedding_caches_complete(self.sd):
+            print_acc("Text embedding cache preflight: cache is incomplete; text encoder is needed.")
+            return
+
+        print_acc("Text embedding cache preflight: all caches found; skipping text encoder load.")
+        self.sd.model_config.skip_text_encoder_load = True
 
     def get_latest_save_path(self, name=None, post=''):
         if name == None:
@@ -1619,6 +1686,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         )
         
         self.hook_after_sd_init_before_load()
+        self.maybe_skip_text_encoder_load_for_cached_embeddings()
         # run base sd process run
         self.sd.load_model()
         
@@ -1639,7 +1707,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
             if isinstance(text_encoder, list):
                 for te in text_encoder:
                     # if it has it
-                    if hasattr(te, 'enable_xformers_memory_efficient_attention'):
+                    if te is not None and hasattr(te, 'enable_xformers_memory_efficient_attention'):
                         te.enable_xformers_memory_efficient_attention()
         
         if self.train_config.attention_backend != 'native':
@@ -1649,10 +1717,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 unet.set_attention_backend(self.train_config.attention_backend)
             if isinstance(text_encoder, list):
                 for te in text_encoder:
-                    if hasattr(te, 'set_attention_backend'):
+                    if te is not None and hasattr(te, 'set_attention_backend'):
                         te.set_attention_backend(self.train_config.attention_backend)
             else:
-                if hasattr(text_encoder, 'set_attention_backend'):
+                if text_encoder is not None and hasattr(text_encoder, 'set_attention_backend'):
                     text_encoder.set_attention_backend(self.train_config.attention_backend)
         if self.train_config.sdp:
             torch.backends.cuda.enable_math_sdp(True)
@@ -1687,14 +1755,14 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 print("Gradient checkpointing not supported on this model")
             if isinstance(text_encoder, list):
                 for te in text_encoder:
-                    if hasattr(te, 'enable_gradient_checkpointing'):
+                    if te is not None and hasattr(te, 'enable_gradient_checkpointing'):
                         te.enable_gradient_checkpointing()
-                    if hasattr(te, "gradient_checkpointing_enable"):
+                    if te is not None and hasattr(te, "gradient_checkpointing_enable"):
                         te.gradient_checkpointing_enable()
             else:
-                if hasattr(text_encoder, 'enable_gradient_checkpointing'):
+                if text_encoder is not None and hasattr(text_encoder, 'enable_gradient_checkpointing'):
                     text_encoder.enable_gradient_checkpointing()
-                if hasattr(text_encoder, "gradient_checkpointing_enable"):
+                if text_encoder is not None and hasattr(text_encoder, "gradient_checkpointing_enable"):
                     text_encoder.gradient_checkpointing_enable()
 
         if self.sd.refiner_unet is not None:
@@ -1708,11 +1776,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         if isinstance(text_encoder, list):
             for te in text_encoder:
-                te.requires_grad_(False)
-                te.eval()
+                if te is not None:
+                    te.requires_grad_(False)
+                    te.eval()
         else:
-            text_encoder.requires_grad_(False)
-            text_encoder.eval()
+            if text_encoder is not None:
+                text_encoder.requires_grad_(False)
+                text_encoder.eval()
         unet.to(self.device_torch, dtype=dtype)
         unet.requires_grad_(False)
         unet.eval()

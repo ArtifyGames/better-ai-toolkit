@@ -156,11 +156,11 @@ class StableDiffusion:
 
         self.device_state = None
 
-        self.pipeline: Union[None, 'StableDiffusionPipeline', 'CustomStableDiffusionXLPipeline', 'PixArtAlphaPipeline']
-        self.vae: Union[None, 'AutoencoderKL']
-        self.unet: Union[None, 'UNet2DConditionModel']
-        self.text_encoder: Union[None, 'CLIPTextModel', List[Union['CLIPTextModel', 'CLIPTextModelWithProjection']]]
-        self.tokenizer: Union[None, 'CLIPTokenizer', List['CLIPTokenizer']]
+        self.pipeline: Union[None, 'StableDiffusionPipeline', 'CustomStableDiffusionXLPipeline', 'PixArtAlphaPipeline'] = None
+        self.vae: Union[None, 'AutoencoderKL'] = None
+        self.unet: Union[None, 'UNet2DConditionModel'] = None
+        self.text_encoder: Union[None, 'CLIPTextModel', List[Union['CLIPTextModel', 'CLIPTextModelWithProjection']]] = None
+        self.tokenizer: Union[None, 'CLIPTokenizer', List['CLIPTokenizer']] = None
         self.noise_scheduler: Union[None, 'DDPMScheduler'] = noise_scheduler
 
         self.refiner_unet: Union[None, 'UNet2DConditionModel'] = None
@@ -786,24 +786,32 @@ class StableDiffusion:
                 vae = AutoencoderKL.from_pretrained(base_model_path, subfolder="vae", torch_dtype=dtype)
             flush()
             
-            self.print_and_status_update("Loading T5")
-            tokenizer_2 = T5TokenizerFast.from_pretrained(base_model_path, subfolder="tokenizer_2", torch_dtype=dtype)
-            text_encoder_2 = T5EncoderModel.from_pretrained(base_model_path, subfolder="text_encoder_2",
-                                                            torch_dtype=dtype)
+            skip_text_encoder_load = self.model_config.skip_text_encoder_load
+            if skip_text_encoder_load:
+                self.print_and_status_update("Skipping text encoder load; cached text embeddings will be used")
+                text_encoder = None
+                text_encoder_2 = None
+                tokenizer = None
+                tokenizer_2 = None
+            else:
+                self.print_and_status_update("Loading T5")
+                tokenizer_2 = T5TokenizerFast.from_pretrained(base_model_path, subfolder="tokenizer_2", torch_dtype=dtype)
+                text_encoder_2 = T5EncoderModel.from_pretrained(base_model_path, subfolder="text_encoder_2",
+                                                                torch_dtype=dtype)
 
-            text_encoder_2.to(self.device_torch, dtype=dtype)
-            flush()
-
-            if self.model_config.quantize_te:
-                self.print_and_status_update("Quantizing T5")
-                quantize(text_encoder_2, weights=get_qtype(self.model_config.qtype))
-                freeze(text_encoder_2)
+                text_encoder_2.to(self.device_torch, dtype=dtype)
                 flush()
-                
-            self.print_and_status_update("Loading CLIP")
-            text_encoder = CLIPTextModel.from_pretrained(base_model_path, subfolder="text_encoder", torch_dtype=dtype)
-            tokenizer = CLIPTokenizer.from_pretrained(base_model_path, subfolder="tokenizer", torch_dtype=dtype)
-            text_encoder.to(self.device_torch, dtype=dtype)
+
+                if self.model_config.quantize_te:
+                    self.print_and_status_update("Quantizing T5")
+                    quantize(text_encoder_2, weights=get_qtype(self.model_config.qtype))
+                    freeze(text_encoder_2)
+                    flush()
+
+                self.print_and_status_update("Loading CLIP")
+                text_encoder = CLIPTextModel.from_pretrained(base_model_path, subfolder="text_encoder", torch_dtype=dtype)
+                tokenizer = CLIPTokenizer.from_pretrained(base_model_path, subfolder="tokenizer", torch_dtype=dtype)
+                text_encoder.to(self.device_torch, dtype=dtype)
 
             self.print_and_status_update("Making pipe")
             Pipe = FluxPipeline
@@ -828,12 +836,14 @@ class StableDiffusion:
             pipe.transformer = pipe.transformer.to(self.device_torch)
 
             flush()
-            text_encoder[0].to(self.device_torch)
-            text_encoder[0].requires_grad_(False)
-            text_encoder[0].eval()
-            text_encoder[1].to(self.device_torch)
-            text_encoder[1].requires_grad_(False)
-            text_encoder[1].eval()
+            if text_encoder[0] is not None:
+                text_encoder[0].to(self.device_torch)
+                text_encoder[0].requires_grad_(False)
+                text_encoder[0].eval()
+            if text_encoder[1] is not None:
+                text_encoder[1].to(self.device_torch)
+                text_encoder[1].requires_grad_(False)
+                text_encoder[1].eval()
             pipe.transformer = pipe.transformer.to(self.device_torch)
             flush()
         elif self.model_config.is_lumina2:
@@ -2913,6 +2923,13 @@ class StableDiffusion:
         if isinstance(self.text_encoder, list):
             self.device_state['text_encoder']: List[dict] = []
             for encoder in self.text_encoder:
+                if encoder is None:
+                    self.device_state['text_encoder'].append({
+                        'training': False,
+                        'device': 'cpu',
+                        'requires_grad': False
+                    })
+                    continue
                 if isinstance(encoder, LlamaModel):
                     te_has_grad = encoder.layers[0].mlp.gate_proj.weight.requires_grad
                 else:
@@ -2927,22 +2944,34 @@ class StableDiffusion:
                     'requires_grad': te_has_grad
                 })
         else:
-            if isinstance(self.text_encoder, T5EncoderModel) or isinstance(self.text_encoder, UMT5EncoderModel):
+            if self.text_encoder is None:
+                self.device_state['text_encoder'] = {
+                    'training': False,
+                    'device': 'cpu',
+                    'requires_grad': False
+                }
+            elif isinstance(self.text_encoder, T5EncoderModel) or isinstance(self.text_encoder, UMT5EncoderModel):
                 te_has_grad = self.text_encoder.encoder.block[0].layer[0].SelfAttention.q.weight.requires_grad
-            elif isinstance(self.text_encoder, Gemma2Model):
-                te_has_grad = self.text_encoder.layers[0].mlp.gate_proj.weight.requires_grad
-            elif isinstance(self.text_encoder, Qwen2Model):
-                te_has_grad = self.text_encoder.layers[0].mlp.gate_proj.weight.requires_grad
-            elif isinstance(self.text_encoder, LlamaModel):
-                te_has_grad = self.text_encoder.layers[0].mlp.gate_proj.weight.requires_grad
+                self.device_state['text_encoder'] = {
+                    'training': self.text_encoder.training,
+                    'device': self.text_encoder.device,
+                    'requires_grad': te_has_grad
+                }
             else:
-                te_has_grad = self.text_encoder.text_model.final_layer_norm.weight.requires_grad
+                if isinstance(self.text_encoder, Gemma2Model):
+                    te_has_grad = self.text_encoder.layers[0].mlp.gate_proj.weight.requires_grad
+                elif isinstance(self.text_encoder, Qwen2Model):
+                    te_has_grad = self.text_encoder.layers[0].mlp.gate_proj.weight.requires_grad
+                elif isinstance(self.text_encoder, LlamaModel):
+                    te_has_grad = self.text_encoder.layers[0].mlp.gate_proj.weight.requires_grad
+                else:
+                    te_has_grad = self.text_encoder.text_model.final_layer_norm.weight.requires_grad
 
-            self.device_state['text_encoder'] = {
-                'training': self.text_encoder.training,
-                'device': self.text_encoder.device,
-                'requires_grad': te_has_grad
-            }
+                self.device_state['text_encoder'] = {
+                    'training': self.text_encoder.training,
+                    'device': self.text_encoder.device,
+                    'requires_grad': te_has_grad
+                }
         if self.adapter is not None:
             if isinstance(self.adapter, IPAdapter):
                 requires_grad = self.adapter.image_proj_model.training
@@ -3003,6 +3032,8 @@ class StableDiffusion:
             self.unet.requires_grad_(False)
         if isinstance(self.text_encoder, list):
             for i, encoder in enumerate(self.text_encoder):
+                if encoder is None:
+                    continue
                 if isinstance(state['text_encoder'], list):
                     if state['text_encoder'][i]['training']:
                         encoder.train()
@@ -3018,12 +3049,13 @@ class StableDiffusion:
                     encoder.to(state['text_encoder']['device'])
                     encoder.requires_grad_(state['text_encoder']['requires_grad'])
         else:
-            if state['text_encoder']['training']:
-                self.text_encoder.train()
-            else:
-                self.text_encoder.eval()
-            self.text_encoder.to(state['text_encoder']['device'])
-            self.text_encoder.requires_grad_(state['text_encoder']['requires_grad'])
+            if self.text_encoder is not None:
+                if state['text_encoder']['training']:
+                    self.text_encoder.train()
+                else:
+                    self.text_encoder.eval()
+                self.text_encoder.to(state['text_encoder']['device'])
+                self.text_encoder.requires_grad_(state['text_encoder']['requires_grad'])
 
         if self.adapter is not None:
             self.adapter.to(state['adapter']['device'])
@@ -3111,9 +3143,11 @@ class StableDiffusion:
     def text_encoder_to(self, *args, **kwargs):
         if isinstance(self.text_encoder, list):
             for encoder in self.text_encoder:
-                encoder.to(*args, **kwargs)
+                if encoder is not None:
+                    encoder.to(*args, **kwargs)
         else:
-            self.text_encoder.to(*args, **kwargs)
+            if self.text_encoder is not None:
+                self.text_encoder.to(*args, **kwargs)
             
     def convert_lora_weights_before_save(self, state_dict):
         # can be overridden in child classes to convert weights before saving

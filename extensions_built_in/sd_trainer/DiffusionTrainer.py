@@ -11,7 +11,7 @@ import signal
 from toolkit.basic import flush
 from toolkit.print import print_acc
 
-AITK_Status = Literal["running", "stopped", "error", "completed"]
+AITK_Status = Literal["running", "stopped", "queued", "error", "completed"]
 
 
 class DiffusionTrainer(SDTrainer):
@@ -32,6 +32,8 @@ class DiffusionTrainer(SDTrainer):
         
         if self.is_ui_trainer:
             self.is_stopping = False
+            self._saving_for_stop = False
+            self._did_save_for_stop = False
             # Create a thread pool for database operations
             self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             # Track all async tasks
@@ -160,19 +162,51 @@ class DiffusionTrainer(SDTrainer):
 
         return self._retry_db_operation(_check_return_to_queue)
 
+    def can_save_before_stop(self):
+        return (
+            self.is_ui_trainer
+            and hasattr(self, "sd")
+            and self.optimizer is not None
+            and self.step_num > self.last_save_step
+        )
+
+    def save_before_stop(self):
+        if not self.can_save_before_stop() or self._did_save_for_stop:
+            return
+
+        if self.progress_bar is not None:
+            self.progress_bar.pause()
+
+        print_acc(f"\nSaving before stop at step {self.step_num}")
+        self._saving_for_stop = True
+        try:
+            self.accelerator.wait_for_everyone()
+            if self.accelerator.is_main_process:
+                self.optimizer.zero_grad()
+                self.save(self.step_num)
+                self.ensure_params_requires_grad()
+                flush()
+                self.update_db_key("step", self.last_save_step)
+            self.accelerator.wait_for_everyone()
+            self._did_save_for_stop = True
+        finally:
+            self._saving_for_stop = False
+            if self.progress_bar is not None:
+                self.progress_bar.unpause()
+
+    def stop_training(self, status: AITK_Status, info: str, error_message: str):
+        self.is_stopping = True
+        self.save_before_stop()
+        self._run_async_operation(self._update_status(status, info))
+        raise Exception(error_message)
+
     def maybe_stop(self):
         if not self.is_ui_trainer:
             return
         if self.should_stop():
-            self._run_async_operation(
-                self._update_status("stopped", "Job stopped"))
-            self.is_stopping = True
-            raise Exception("Job stopped")
+            self.stop_training("stopped", "Job stopped", "Job stopped")
         if self.should_return_to_queue():
-            self._run_async_operation(
-                self._update_status("queued", "Job queued"))
-            self.is_stopping = True
-            raise Exception("Job returning to queue")
+            self.stop_training("queued", "Job queued", "Job returning to queue")
 
     def should_save(self):
         if not self.is_ui_trainer:
@@ -366,8 +400,10 @@ class DiffusionTrainer(SDTrainer):
         self.update_status("running", "Training")
 
     def save(self, step=None):
-        self.maybe_stop()
+        if not getattr(self, "_saving_for_stop", False):
+            self.maybe_stop()
         self.update_status("running", "Saving model")
         super().save(step)
-        self.maybe_stop()
-        self.update_status("running", "Training")
+        if not getattr(self, "_saving_for_stop", False):
+            self.maybe_stop()
+            self.update_status("running", "Training")
