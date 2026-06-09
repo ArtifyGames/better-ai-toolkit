@@ -81,6 +81,9 @@ class QwenImageModel(BaseModel):
     def get_bucket_divisibility(self):
         return 16 * 2  # 16 for the VAE, 2 for patch size
 
+    def supports_text_encoder_load_skip(self) -> bool:
+        return True
+
     def load_model(self):
         dtype = self.torch_dtype
         self.print_and_status_update("Loading Qwen Image model")
@@ -141,37 +144,44 @@ class QwenImageModel(BaseModel):
 
         flush()
 
-        self.print_and_status_update("Text Encoder")
-        tokenizer = Qwen2Tokenizer.from_pretrained(
-            base_model_path, subfolder="tokenizer", torch_dtype=dtype
-        )
-        text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            base_model_path, subfolder="text_encoder", torch_dtype=dtype
-        )
-
-        # remove the visual model as it is not needed for image generation
         self.processor = None
-        if not self._qwen_image_keep_visual:
-            text_encoder.model.visual = None
-
-        if (
-            self.model_config.layer_offloading
-            and self.model_config.layer_offloading_text_encoder_percent > 0
-        ):
-            MemoryManager.attach(
-                text_encoder,
-                self.device_torch,
-                offload_percent=self.model_config.layer_offloading_text_encoder_percent,
+        if self.model_config.skip_text_encoder_load:
+            self.print_and_status_update(
+                "Skipping text encoder load; cached text embeddings will be used"
+            )
+            tokenizer = None
+            text_encoder = None
+        else:
+            self.print_and_status_update("Text Encoder")
+            tokenizer = Qwen2Tokenizer.from_pretrained(
+                base_model_path, subfolder="tokenizer", torch_dtype=dtype
+            )
+            text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                base_model_path, subfolder="text_encoder", torch_dtype=dtype
             )
 
-        text_encoder.to(self.device_torch, dtype=dtype)
-        flush()
+            # remove the visual model as it is not needed for image generation
+            if not self._qwen_image_keep_visual:
+                text_encoder.model.visual = None
 
-        if self.model_config.quantize_te:
-            self.print_and_status_update("Quantizing Text Encoder")
-            quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
-            freeze(text_encoder)
+            if (
+                self.model_config.layer_offloading
+                and self.model_config.layer_offloading_text_encoder_percent > 0
+            ):
+                MemoryManager.attach(
+                    text_encoder,
+                    self.device_torch,
+                    offload_percent=self.model_config.layer_offloading_text_encoder_percent,
+                )
+
+            text_encoder.to(self.device_torch, dtype=dtype)
             flush()
+
+            if self.model_config.quantize_te:
+                self.print_and_status_update("Quantizing Text Encoder")
+                quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
+                freeze(text_encoder)
+                flush()
 
         self.print_and_status_update("Loading VAE")
         vae = AutoencoderKLQwenImage.from_pretrained(
@@ -218,9 +228,10 @@ class QwenImageModel(BaseModel):
 
         flush()
         # just to make sure everything is on the right device and dtype
-        text_encoder[0].to(self.device_torch)
-        text_encoder[0].requires_grad_(False)
-        text_encoder[0].eval()
+        if text_encoder[0] is not None:
+            text_encoder[0].to(self.device_torch)
+            text_encoder[0].requires_grad_(False)
+            text_encoder[0].eval()
         flush()
 
         # save it to the model class

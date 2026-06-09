@@ -88,6 +88,9 @@ class Flux2Model(BaseModel):
     def get_bucket_divisibility(self):
         return 16
 
+    def supports_text_encoder_load_skip(self) -> bool:
+        return True
+
     def get_flux2_params(self):
         return Flux2Params()
 
@@ -154,6 +157,8 @@ class Flux2Model(BaseModel):
             transformer_state_dict[key] = transformer_state_dict[key].to(dtype)
 
         transformer.load_state_dict(transformer_state_dict, assign=True)
+        del transformer_state_dict
+        flush()
 
         if self.model_config.quantize:
             # patch the state dict method
@@ -181,7 +186,14 @@ class Flux2Model(BaseModel):
             self.print_and_status_update("Moving transformer to CPU")
             transformer.to("cpu")
 
-        text_encoder, tokenizer = self.load_te()
+        if self.model_config.skip_text_encoder_load:
+            self.print_and_status_update(
+                "Skipping text encoder load; cached text embeddings will be used"
+            )
+            text_encoder = None
+            tokenizer = None
+        else:
+            text_encoder, tokenizer = self.load_te()
 
         self.print_and_status_update("Loading VAE")
         vae_path = self.model_config.vae_path
@@ -222,6 +234,8 @@ class Flux2Model(BaseModel):
             vae_state_dict[key] = vae_state_dict[key].to(dtype)
 
         vae.load_state_dict(vae_state_dict, assign=True)
+        del vae_state_dict
+        flush()
 
         self.noise_scheduler = Flux2Model.get_train_scheduler()
 
@@ -246,12 +260,13 @@ class Flux2Model(BaseModel):
 
         flush()
         # just to make sure everything is on the right device and dtype
-        if self.model_config.low_vram:
-            text_encoder[0].to("cpu")
-        else:
-            text_encoder[0].to(self.device_torch)
-        text_encoder[0].requires_grad_(False)
-        text_encoder[0].eval()
+        if text_encoder[0] is not None:
+            if self.model_config.low_vram:
+                text_encoder[0].to("cpu")
+            else:
+                text_encoder[0].to(self.device_torch)
+            text_encoder[0].requires_grad_(False)
+            text_encoder[0].eval()
         if self.model_config.low_vram:
             pipe.transformer = pipe.transformer.to("cpu")
         else:

@@ -41,6 +41,7 @@ export async function GET(request: NextRequest, { params }: { params: { jobID: s
     return {
       path: file,
       size: stats.size,
+      createdAtMs: stats.ctimeMs,
     };
   });
 
@@ -51,6 +52,7 @@ export async function GET(request: NextRequest, { params }: { params: { jobID: s
     fileObjects.push({
       path: optimizerPath,
       size: stats.size,
+      createdAtMs: stats.ctimeMs,
     });
   }
 

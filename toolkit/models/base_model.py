@@ -133,6 +133,11 @@ class BaseModel:
         self.text_encoder: Union[None, 'CLIPTextModel',
                                  List[Union['CLIPTextModel', 'CLIPTextModelWithProjection']]]
         self.tokenizer: Union[None, 'CLIPTokenizer', List['CLIPTokenizer']]
+        self.pipeline = None
+        self.vae = None
+        self.model = None
+        self.text_encoder = None
+        self.tokenizer = None
         self.noise_scheduler: Union[None, 'DDPMScheduler'] = noise_scheduler
 
         self.refiner_unet: Union[None, 'UNet2DConditionModel'] = None
@@ -276,6 +281,9 @@ class BaseModel:
         raise NotImplementedError(
             "load_model must be implemented in child classes")
 
+    def supports_text_encoder_load_skip(self) -> bool:
+        return False
+
     def get_generation_pipeline(self):
         # override this in child classes
         raise NotImplementedError(
@@ -330,14 +338,16 @@ class BaseModel:
     def te_train(self):
         if isinstance(self.text_encoder, list):
             for te in self.text_encoder:
-                te.train()
+                if te is not None:
+                    te.train()
         elif self.text_encoder is not None:
             self.text_encoder.train()
 
     def te_eval(self):
         if isinstance(self.text_encoder, list):
             for te in self.text_encoder:
-                te.eval()
+                if te is not None:
+                    te.eval()
         elif self.text_encoder is not None:
             self.text_encoder.eval()
 
@@ -1384,6 +1394,9 @@ class BaseModel:
         if isinstance(self.text_encoder, list):
             self.device_state['text_encoder']: List[dict] = []
             for encoder in self.text_encoder:
+                if encoder is None:
+                    self.device_state['text_encoder'].append(None)
+                    continue
                 te_has_grad = self.get_te_has_grad()
                 self.device_state['text_encoder'].append({
                     'training': encoder.training,
@@ -1391,7 +1404,7 @@ class BaseModel:
                     # todo there has to be a better way to do this
                     'requires_grad': te_has_grad
                 })
-        else:
+        elif self.text_encoder is not None:
             te_has_grad = self.get_te_has_grad()
 
             self.device_state['text_encoder'] = {
@@ -1399,6 +1412,8 @@ class BaseModel:
                 'device': self.text_encoder.device,
                 'requires_grad': te_has_grad
             }
+        else:
+            self.device_state['text_encoder'] = None
         if self.adapter is not None:
             if isinstance(self.adapter, IPAdapter):
                 requires_grad = self.adapter.image_proj_model.training
@@ -1459,7 +1474,11 @@ class BaseModel:
             self.unet.requires_grad_(False)
         if isinstance(self.text_encoder, list):
             for i, encoder in enumerate(self.text_encoder):
+                if encoder is None:
+                    continue
                 if isinstance(state['text_encoder'], list):
+                    if state['text_encoder'][i] is None:
+                        continue
                     if state['text_encoder'][i]['training']:
                         encoder.train()
                     else:
@@ -1467,7 +1486,7 @@ class BaseModel:
                     encoder.to(state['text_encoder'][i]['device'])
                     encoder.requires_grad_(
                         state['text_encoder'][i]['requires_grad'])
-                else:
+                elif state['text_encoder'] is not None:
                     if state['text_encoder']['training']:
                         encoder.train()
                     else:
@@ -1475,7 +1494,7 @@ class BaseModel:
                     encoder.to(state['text_encoder']['device'])
                     encoder.requires_grad_(
                         state['text_encoder']['requires_grad'])
-        else:
+        elif self.text_encoder is not None and state['text_encoder'] is not None:
             if state['text_encoder']['training']:
                 self.text_encoder.train()
             else:
@@ -1568,8 +1587,9 @@ class BaseModel:
     def text_encoder_to(self, *args, **kwargs):
         if isinstance(self.text_encoder, list):
             for encoder in self.text_encoder:
-                encoder.to(*args, **kwargs)
-        else:
+                if encoder is not None:
+                    encoder.to(*args, **kwargs)
+        elif self.text_encoder is not None:
             self.text_encoder.to(*args, **kwargs)
     
     def convert_lora_weights_before_save(self, state_dict):

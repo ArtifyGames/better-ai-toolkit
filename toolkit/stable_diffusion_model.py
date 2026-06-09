@@ -64,7 +64,7 @@ from huggingface_hub import hf_hub_download
 from toolkit.models.flux import add_model_gpu_splitter_to_flux, bypass_flux_guidance, restore_flux_guidance
 
 from optimum.quanto import freeze, qfloat8, QTensor, qint4
-from toolkit.util.quantize import quantize, get_qtype
+from toolkit.util.quantize import quantize, get_qtype, quantize_model
 from toolkit.accelerator import get_accelerator, unwrap_model
 from typing import TYPE_CHECKING
 from toolkit.print import print_acc
@@ -766,11 +766,14 @@ class StableDiffusion:
             flush()
             
             if self.model_config.quantize:
-                # patch the state dict method
-                patch_dequantization_on_save(transformer)
-                quantization_type = get_qtype(self.model_config.qtype)
                 self.print_and_status_update("Quantizing transformer")
-                quantize(transformer, weights=quantization_type, **self.model_config.quantize_kwargs)
+                if len(self.model_config.quantize_kwargs) == 0:
+                    quantize_model(self, transformer)
+                else:
+                    # patch the state dict method
+                    patch_dequantization_on_save(transformer)
+                    quantization_type = get_qtype(self.model_config.qtype)
+                    quantize(transformer, weights=quantization_type, **self.model_config.quantize_kwargs)
                 freeze(transformer)
                 transformer.to(self.device_torch)
             else:
@@ -1071,18 +1074,23 @@ class StableDiffusion:
             for key in ASPECT_RATIO_2048_BIN.keys():
                 ASPECT_RATIO_2048_BIN[key] = [ASPECT_RATIO_2048_BIN[key][0] * 2, ASPECT_RATIO_2048_BIN[key][1] * 2]
 
+    def supports_text_encoder_load_skip(self) -> bool:
+        return self.is_flux
+
     def te_train(self):
         if isinstance(self.text_encoder, list):
             for te in self.text_encoder:
-                te.train()
-        else:
+                if te is not None:
+                    te.train()
+        elif self.text_encoder is not None:
             self.text_encoder.train()
 
     def te_eval(self):
         if isinstance(self.text_encoder, list):
             for te in self.text_encoder:
-                te.eval()
-        else:
+                if te is not None:
+                    te.eval()
+        elif self.text_encoder is not None:
             self.text_encoder.eval()
 
     def load_refiner(self):
@@ -3163,6 +3171,8 @@ class StableDiffusion:
     
     def get_transformer_block_names(self) -> Optional[List[str]]:
         # override in child classes to get transformer block names for lora targeting
+        if self.is_flux:
+            return ['transformer_blocks', 'single_transformer_blocks']
         return None
     
     def get_base_model_version(self) -> str:

@@ -224,6 +224,9 @@ export interface SliderConfig {
 export interface ProcessConfig {
   type: string;
   sqlite_db_path?: string;
+  resume_from_path?: string;
+  resume_from_name?: string;
+  resume_branch_from?: string;
   training_folder: string;
   performance_log_every: number;
   trigger_word: string | null;

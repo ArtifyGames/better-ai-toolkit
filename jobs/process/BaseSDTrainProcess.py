@@ -128,6 +128,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.lr_scheduler = None
         self.data_loader: Union[DataLoader, None] = None
         self.data_loader_reg: Union[DataLoader, None] = None
+        self._did_before_dataset_load = False
+        self._did_setup_data_loaders = False
+        self.resume_from_path = self.get_conf('resume_from_path', None)
+        self.resume_from_name = self.get_conf('resume_from_name', None)
+        self.resume_branch_from = self.get_conf('resume_branch_from', None)
+        self._did_print_resume_from_path = False
         self.trigger_word = self.get_conf('trigger_word', None)
 
         self.guidance_config: Union[GuidanceConfig, None] = None
@@ -782,6 +788,20 @@ class BaseSDTrainProcess(BaseTrainProcess):
     def before_dataset_load(self):
         pass
 
+    def setup_data_loaders(self):
+        if self._did_setup_data_loaders:
+            return
+        if not self._did_before_dataset_load:
+            self.before_dataset_load()
+            self._did_before_dataset_load = True
+        # load datasets if passed in the root process
+        if self.datasets is not None:
+            self.data_loader = get_dataloader_from_datasets(self.datasets, self.train_config.batch_size, self.sd)
+        if self.datasets_reg is not None:
+            self.data_loader_reg = get_dataloader_from_datasets(self.datasets_reg, self.train_config.batch_size,
+                                                                self.sd)
+        self._did_setup_data_loaders = True
+
     def get_params(self):
         # you can extend this in subclass to get params
         # otherwise params will be gathered through normal means
@@ -844,7 +864,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
         return True
 
     def maybe_skip_text_encoder_load_for_cached_embeddings(self):
-        if self.sd.__class__ is not StableDiffusion or not self.sd.is_flux:
+        supports_skip = False
+        if hasattr(self.sd, 'supports_text_encoder_load_skip'):
+            supports_skip = self.sd.supports_text_encoder_load_skip()
+        if not supports_skip:
             return
         if not self.is_caching_text_embeddings:
             return
@@ -904,6 +927,26 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 print_acc(f"Pretrained lora path from config does not exist: {self.network_config.pretrained_lora_path}")
 
         return latest_path
+
+    def get_configured_resume_path(self):
+        if self.resume_from_path is None:
+            return None
+        resume_path = os.path.abspath(os.path.expanduser(self.resume_from_path))
+        if not os.path.exists(resume_path):
+            raise ValueError(f"Configured resume_from_path does not exist: {resume_path}")
+        if not self._did_print_resume_from_path:
+            branch_info = f" for branch '{self.resume_from_name}'" if self.resume_from_name else ""
+            print_acc(f"Using configured resume checkpoint{branch_info}: {resume_path}")
+            if self.resume_branch_from:
+                print_acc(f"Branch source job: {self.resume_branch_from}")
+            self._did_print_resume_from_path = True
+        return resume_path
+
+    def get_resume_save_path(self, name=None, post=''):
+        configured_resume_path = self.get_configured_resume_path()
+        if configured_resume_path is not None:
+            return configured_resume_path
+        return self.get_latest_save_path(name, post)
 
     def load_training_state_from_metadata(self, path):
         if not self.accelerator.is_main_process:
@@ -1641,7 +1684,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if self.is_fine_tuning or self.train_config.merge_network_on_save:
             # get the latest checkpoint
             # check to see if we have a latest save
-            latest_save_path = self.get_latest_save_path()
+            latest_save_path = self.get_resume_save_path()
 
             if latest_save_path is not None:
                 print_acc(f"#### IMPORTANT RESUMING FROM {latest_save_path} ####")
@@ -1925,7 +1968,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 if self.named_lora:
                     lora_name = f"{lora_name}_LoRA"
 
-                latest_save_path = self.get_latest_save_path(lora_name)
+                latest_save_path = self.get_resume_save_path(lora_name)
                 extra_weights = None
                 if latest_save_path is not None and not self.train_config.merge_network_on_save:
                     print_acc(f"#### IMPORTANT RESUMING FROM {latest_save_path} ####")
@@ -2034,6 +2077,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.params = params
         # self.params = []
 
+        # Build datasets before the optimizer so first-run cache generation does
+        # not overlap with optimizer state in host RAM.
+        self.setup_data_loaders()
+        flush()
+
         # for param in params:
         #     if isinstance(param, dict):
         #         self.params += param['params']
@@ -2061,6 +2109,16 @@ class BaseSDTrainProcess(BaseTrainProcess):
         optimizer_state_filename = f'optimizer.pt'
         optimizer_state_file_path = os.path.join(self.save_root, optimizer_state_filename)
         if os.path.exists(optimizer_state_file_path):
+            configured_resume_path = self.get_configured_resume_path()
+            optimizer_matches_resume_source = True
+            if configured_resume_path is not None:
+                save_root_abs = os.path.abspath(self.save_root)
+                try:
+                    optimizer_matches_resume_source = os.path.commonpath(
+                        [save_root_abs, configured_resume_path]
+                    ) == save_root_abs
+                except ValueError:
+                    optimizer_matches_resume_source = False
             # try to load
             # previous param groups
             # previous_params = copy.deepcopy(optimizer.param_groups)
@@ -2069,6 +2127,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 previous_lrs.append(group['lr'])
 
             load_optimizer = True
+            if not optimizer_matches_resume_source:
+                print_acc("Skipping optimizer state because resume checkpoint is from another output folder.")
+                load_optimizer = False
             if self.network is not None:
                 if self.network.did_change_weights:
                     # do not load optimizer if the network changed, it will result in
@@ -2109,15 +2170,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         )
         self.lr_scheduler = lr_scheduler
 
-        ### HOOk ###
-        self.before_dataset_load()
-        # load datasets if passed in the root process
-        if self.datasets is not None:
-            self.data_loader = get_dataloader_from_datasets(self.datasets, self.train_config.batch_size, self.sd)
-        if self.datasets_reg is not None:
-            self.data_loader_reg = get_dataloader_from_datasets(self.datasets_reg, self.train_config.batch_size,
-                                                                self.sd)
-
+        self.setup_data_loaders()
         flush()
         self.last_save_step = self.step_num
         ### HOOK ###

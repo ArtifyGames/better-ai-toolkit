@@ -291,6 +291,9 @@ class ZImageTransformer2DModel(ZImageTransformer2DModelOriginal):
 class ZImageL2PModel(ZImageModel):
     arch = "zimage_l2p"
 
+    def supports_text_encoder_load_skip(self) -> bool:
+        return False
+
     def load_model(self):
         dtype = self.torch_dtype
         self.print_and_status_update("Loading ZImage model")

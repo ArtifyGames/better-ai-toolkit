@@ -36,6 +36,12 @@ type Props = {
   status: 'idle' | 'saving' | 'success' | 'error';
   handleSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
   runId: string | null;
+  resumeCheckpointOptions?: SelectOption[];
+  selectedResumePath?: string;
+  setSelectedResumePath?: (value: string) => void;
+  resumeBranchName?: string;
+  setResumeBranchName?: (value: string) => void;
+  isBranchResume?: boolean;
   gpuIDs: string | null;
   setGpuIDs: (value: string | null) => void;
   gpuList: any;
@@ -51,6 +57,12 @@ export default function SimpleJob({
   handleSubmit,
   status,
   runId,
+  resumeCheckpointOptions = [],
+  selectedResumePath = '',
+  setSelectedResumePath,
+  resumeBranchName = '',
+  setResumeBranchName,
+  isBranchResume = false,
   gpuIDs,
   setGpuIDs,
   gpuList,
@@ -241,6 +253,25 @@ export default function SimpleJob({
               disabled={runId !== null}
               required
             />
+            {runId !== null && resumeCheckpointOptions.length > 0 && (
+              <>
+                <SelectInput
+                  label="Resume Checkpoint"
+                  value={selectedResumePath}
+                  onChange={value => setSelectedResumePath?.(value)}
+                  options={resumeCheckpointOptions}
+                />
+                {isBranchResume && (
+                  <TextInput
+                    label="Branch Name"
+                    value={resumeBranchName}
+                    onChange={value => setResumeBranchName?.(value)}
+                    placeholder="Enter new branch name"
+                    required
+                  />
+                )}
+              </>
+            )}
             {showGPUSelect && (
               <SelectInput
                 label="GPU ID"

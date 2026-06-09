@@ -9,6 +9,7 @@ import threading
 import time
 import signal
 from toolkit.basic import flush
+from toolkit.job_control import JobControlExit
 from toolkit.print import print_acc
 
 AITK_Status = Literal["running", "stopped", "queued", "error", "completed"]
@@ -166,6 +167,10 @@ class UITrainer(SDTrainer):
         self.is_stopping = True
         self.save_before_stop()
         self._run_async_operation(self._update_status(status, info))
+        if status in ("stopped", "queued"):
+            asyncio.run(self.wait_for_all_async())
+            self.thread_pool.shutdown(wait=True)
+            raise JobControlExit(status, info)
         raise Exception(error_message)
 
     def maybe_stop(self):

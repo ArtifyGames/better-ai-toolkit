@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { defaultJobConfig, defaultDatasetConfig, migrateJobConfig } from './jobConfig';
 import { jobTypeOptions } from './options';
-import { JobConfig } from '@/types';
+import { JobConfig, SelectOption } from '@/types';
 import { objectCopy } from '@/utils/basic';
 import { useNestedState, setNestedValue } from '@/utils/hooks';
 import { SelectInput } from '@/components/formInputs';
@@ -23,12 +23,59 @@ import { apiClient } from '@/utils/api';
 
 const isDev = process.env.NODE_ENV === 'development';
 
+type CheckpointFile = {
+  path: string;
+  size: number;
+  createdAtMs?: number;
+};
+
+const basename = (filePath: string) => filePath.split(/[\\/]/).pop() ?? filePath;
+
+const isCheckpointFile = (file: CheckpointFile) => file.path.endsWith('.safetensors');
+
+const isPrimaryCheckpointFile = (file: CheckpointFile, jobName: string | null) => {
+  if (!isCheckpointFile(file)) return false;
+  if (!jobName) return true;
+  const name = basename(file.path);
+  if (name.startsWith('CRITIC_')) return false;
+  if (name.includes('_refiner')) return false;
+  if (name.includes('_t2i')) return false;
+  if (name.includes('_cn')) return false;
+  if (name.includes('_clip')) return false;
+  if (name.includes('_ip')) return false;
+  if (name.includes('_adapter')) return false;
+  return name === `${jobName}.safetensors` || name.startsWith(`${jobName}_`) || name.startsWith(`${jobName}_LoRA`);
+};
+
+const clearResumeFields = (config: JobConfig) => {
+  const process = config.config.process[0] as any;
+  delete process.resume_from_path;
+  delete process.resume_from_name;
+  delete process.resume_branch_from;
+};
+
+const formatBytes = (bytes: number) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+};
+
 export default function TrainingForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const runId = searchParams.get('id');
   const cloneId = searchParams.get('cloneId');
   const [gpuIDs, setGpuIDs] = useState<string | null>(null);
+  const [sourceJobName, setSourceJobName] = useState<string | null>(null);
+  const [resumeFiles, setResumeFiles] = useState<CheckpointFile[]>([]);
+  const [selectedResumePath, setSelectedResumePath] = useState('');
+  const [resumeBranchName, setResumeBranchName] = useState('');
   const { settings, isSettingsLoaded } = useSettings();
   const { gpuList, isGPUInfoLoaded } = useGPUInfo();
   const { datasets, status: datasetFetchStatus } = useDatasetList();
@@ -38,6 +85,18 @@ export default function TrainingForm() {
   const [jobConfig, setJobConfig] = useNestedState<JobConfig>(objectCopy(migrateJobConfig(defaultJobConfig)));
   const [status, setStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const checkpointFiles = resumeFiles.filter(file => isPrimaryCheckpointFile(file, sourceJobName));
+  const latestResumePath = checkpointFiles.length > 0 ? checkpointFiles[checkpointFiles.length - 1].path : '';
+  const isBranchResume = !!runId && !!selectedResumePath && selectedResumePath !== latestResumePath;
+  const resumeCheckpointOptions: SelectOption[] = checkpointFiles.map(file => {
+    const isLatest = file.path === latestResumePath;
+    const size = formatBytes(file.size);
+    return {
+      value: file.path,
+      label: `${basename(file.path)}${isLatest ? ' (latest)' : ''}${size ? ` - ${size}` : ''}`,
+    };
+  });
 
   const handleImportConfig = () => {
     fileInputRef.current?.click();
@@ -111,6 +170,7 @@ export default function TrainingForm() {
         .then(res => res.data)
         .then(data => {
           console.log('Clone Training:', data);
+          setSourceJobName(data.name);
           setGpuIDs(data.gpu_ids);
           const newJobConfig = migrateJobConfig(JSON.parse(data.job_config));
           newJobConfig.config.name = `${newJobConfig.config.name}_copy`;
@@ -127,12 +187,46 @@ export default function TrainingForm() {
         .then(res => res.data)
         .then(data => {
           console.log('Training:', data);
+          setSourceJobName(data.name);
           setGpuIDs(data.gpu_ids);
           setJobConfig(migrateJobConfig(JSON.parse(data.job_config)));
         })
         .catch(error => console.error('Error fetching training:', error));
     }
   }, [runId]);
+
+  useEffect(() => {
+    if (!runId) {
+      setResumeFiles([]);
+      setSelectedResumePath('');
+      setResumeBranchName('');
+      return;
+    }
+
+    apiClient
+      .get(`/api/jobs/${runId}/files`)
+      .then(res => res.data)
+      .then(data => {
+        const files = Array.isArray(data.files) ? data.files.filter(isCheckpointFile) : [];
+        files.sort((a: CheckpointFile, b: CheckpointFile) => {
+          const createdCompare = (a.createdAtMs ?? 0) - (b.createdAtMs ?? 0);
+          return createdCompare !== 0 ? createdCompare : a.path.localeCompare(b.path);
+        });
+        setResumeFiles(files);
+        if (files.length > 0) {
+          setSelectedResumePath(files[files.length - 1].path);
+        }
+      })
+      .catch(error => console.error('Error fetching checkpoint files:', error));
+  }, [runId]);
+
+  useEffect(() => {
+    if (!runId || checkpointFiles.length === 0) return;
+    const selectedIsValid = checkpointFiles.some(file => file.path === selectedResumePath);
+    if (!selectedResumePath || !selectedIsValid) {
+      setSelectedResumePath(latestResumePath);
+    }
+  }, [runId, sourceJobName, resumeFiles, selectedResumePath, latestResumePath]);
 
   useEffect(() => {
     if (isGPUInfoLoaded) {
@@ -150,18 +244,51 @@ export default function TrainingForm() {
 
   const saveJob = async () => {
     if (status === 'saving') return;
+
+    const configToSave: JobConfig = objectCopy(jobConfig);
+    const processConfig = configToSave.config.process[0] as any;
+    const trimmedBranchName = resumeBranchName.trim();
+    const creatingBranch = isBranchResume;
+
+    if (creatingBranch) {
+      if (!trimmedBranchName) {
+        alert('Please enter a branch name before creating a branch from an older checkpoint.');
+        return;
+      }
+      if (/[\\/]/.test(trimmedBranchName)) {
+        alert('Branch name cannot contain slashes.');
+        return;
+      }
+      if (trimmedBranchName === '.' || trimmedBranchName === '..') {
+        alert('Branch name must be a normal folder name.');
+        return;
+      }
+      if (trimmedBranchName === sourceJobName) {
+        alert('Branch name must be different from the source job name.');
+        return;
+      }
+
+      configToSave.config.name = trimmedBranchName;
+      processConfig.resume_from_path = selectedResumePath;
+      processConfig.resume_from_name = basename(selectedResumePath);
+      processConfig.resume_branch_from = sourceJobName ?? jobConfig.config.name;
+      delete processConfig.train.start_step;
+    } else if (latestResumePath && selectedResumePath === latestResumePath) {
+      clearResumeFields(configToSave);
+    }
+
     setStatus('saving');
 
     apiClient
       .post('/api/jobs', {
-        id: runId,
-        name: jobConfig.config.name,
+        id: creatingBranch ? undefined : runId,
+        name: configToSave.config.name,
         gpu_ids: gpuIDs,
-        job_config: jobConfig,
+        job_config: configToSave,
       })
       .then(res => {
         setStatus('success');
-        if (runId) {
+        if (runId && !creatingBranch) {
           router.push(`/jobs/${runId}`);
         } else {
           router.push(`/jobs/${res.data.id}`);
@@ -271,8 +398,10 @@ export default function TrainingForm() {
               'Saving...'
             ) : (
               <>
-                <span className="sm:hidden">{runId ? 'Update' : 'Create'}</span>
-                <span className="hidden sm:inline">{runId ? 'Update Job' : 'Create Job'}</span>
+                <span className="sm:hidden">{isBranchResume ? 'Branch' : runId ? 'Update' : 'Create'}</span>
+                <span className="hidden sm:inline">
+                  {isBranchResume ? 'Create Branch' : runId ? 'Update Job' : 'Create Job'}
+                </span>
               </>
             )}
           </Button>
@@ -320,6 +449,12 @@ export default function TrainingForm() {
               status={status}
               handleSubmit={handleSubmit}
               runId={runId}
+              resumeCheckpointOptions={resumeCheckpointOptions}
+              selectedResumePath={selectedResumePath}
+              setSelectedResumePath={setSelectedResumePath}
+              resumeBranchName={resumeBranchName}
+              setResumeBranchName={setResumeBranchName}
+              isBranchResume={isBranchResume}
               gpuIDs={gpuIDs}
               setGpuIDs={setGpuIDs}
               gpuList={gpuList}

@@ -64,6 +64,9 @@ class ZImageModel(BaseModel):
     def get_bucket_divisibility(self):
         return 8 * 2  # 8 for the VAE, 2 for patch size
 
+    def supports_text_encoder_load_skip(self) -> bool:
+        return True
+
     def load_training_adapter(self, transformer: ZImageTransformer2DModel):
         self.print_and_status_update("Loading assistant LoRA")
         lora_path = self.model_config.assistant_lora_path
@@ -202,32 +205,39 @@ class ZImageModel(BaseModel):
 
         flush()
 
-        self.print_and_status_update("Text Encoder")
-        tokenizer = AutoTokenizer.from_pretrained(
-            base_model_path, subfolder="tokenizer", torch_dtype=dtype
-        )
-        text_encoder = Qwen3ForCausalLM.from_pretrained(
-            base_model_path, subfolder="text_encoder", torch_dtype=dtype
-        )
-
-        if (
-            self.model_config.layer_offloading
-            and self.model_config.layer_offloading_text_encoder_percent > 0
-        ):
-            MemoryManager.attach(
-                text_encoder,
-                self.device_torch,
-                offload_percent=self.model_config.layer_offloading_text_encoder_percent,
+        if self.model_config.skip_text_encoder_load:
+            self.print_and_status_update(
+                "Skipping text encoder load; cached text embeddings will be used"
+            )
+            tokenizer = None
+            text_encoder = None
+        else:
+            self.print_and_status_update("Text Encoder")
+            tokenizer = AutoTokenizer.from_pretrained(
+                base_model_path, subfolder="tokenizer", torch_dtype=dtype
+            )
+            text_encoder = Qwen3ForCausalLM.from_pretrained(
+                base_model_path, subfolder="text_encoder", torch_dtype=dtype
             )
 
-        text_encoder.to(self.device_torch, dtype=dtype)
-        flush()
+            if (
+                self.model_config.layer_offloading
+                and self.model_config.layer_offloading_text_encoder_percent > 0
+            ):
+                MemoryManager.attach(
+                    text_encoder,
+                    self.device_torch,
+                    offload_percent=self.model_config.layer_offloading_text_encoder_percent,
+                )
 
-        if self.model_config.quantize_te:
-            self.print_and_status_update("Quantizing Text Encoder")
-            quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
-            freeze(text_encoder)
+            text_encoder.to(self.device_torch, dtype=dtype)
             flush()
+
+            if self.model_config.quantize_te:
+                self.print_and_status_update("Quantizing Text Encoder")
+                quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
+                freeze(text_encoder)
+                flush()
 
         self.print_and_status_update("Loading VAE")
         vae = AutoencoderKL.from_pretrained(
@@ -263,9 +273,10 @@ class ZImageModel(BaseModel):
 
         flush()
         # just to make sure everything is on the right device and dtype
-        text_encoder[0].to(self.device_torch)
-        text_encoder[0].requires_grad_(False)
-        text_encoder[0].eval()
+        if text_encoder[0] is not None:
+            text_encoder[0].to(self.device_torch)
+            text_encoder[0].requires_grad_(False)
+            text_encoder[0].eval()
         flush()
 
         # save it to the model class

@@ -37,15 +37,18 @@ if seed is not None:
 import argparse
 from toolkit.job import get_job
 from toolkit.accelerator import get_accelerator
+from toolkit.job_control import JobControlExit
 from toolkit.print import print_acc, setup_log_to_file
 
 accelerator = get_accelerator()
 
 
-def print_end_message(jobs_completed, jobs_failed):
+def print_end_message(jobs_completed, jobs_failed, jobs_stopped=0, jobs_queued=0):
     if not accelerator.is_main_process:
         return
     failure_string = f"{jobs_failed} failure{'' if jobs_failed == 1 else 's'}" if jobs_failed > 0 else ""
+    stopped_string = f"{jobs_stopped} stopped job{'' if jobs_stopped == 1 else 's'}" if jobs_stopped > 0 else ""
+    queued_string = f"{jobs_queued} queued job{'' if jobs_queued == 1 else 's'}" if jobs_queued > 0 else ""
     completed_string = f"{jobs_completed} completed job{'' if jobs_completed == 1 else 's'}"
 
     print_acc("")
@@ -53,6 +56,10 @@ def print_end_message(jobs_completed, jobs_failed):
     print_acc("Result:")
     if len(completed_string) > 0:
         print_acc(f" - {completed_string}")
+    if len(stopped_string) > 0:
+        print_acc(f" - {stopped_string}")
+    if len(queued_string) > 0:
+        print_acc(f" - {queued_string}")
     if len(failure_string) > 0:
         print_acc(f" - {failure_string}")
     print_acc("========================================")
@@ -101,6 +108,8 @@ def main():
 
     jobs_completed = 0
     jobs_failed = 0
+    jobs_stopped = 0
+    jobs_queued = 0
 
     if accelerator.is_main_process:
         print_acc(f"Running {len(config_file_list)} job{'' if len(config_file_list) == 1 else 's'}")
@@ -111,6 +120,18 @@ def main():
             job.run()
             job.cleanup()
             jobs_completed += 1
+        except JobControlExit as e:
+            print_acc(f"Job {e.status}: {e.info}")
+            if e.status == "queued":
+                jobs_queued += 1
+            else:
+                jobs_stopped += 1
+            try:
+                job.cleanup()
+            except Exception as e2:
+                print_acc(f"Error running cleanup: {e2}")
+            print_end_message(jobs_completed, jobs_failed, jobs_stopped, jobs_queued)
+            return
         except Exception as e:
             print_acc(f"Error running job: {e}")
             jobs_failed += 1
@@ -119,7 +140,7 @@ def main():
             except Exception as e2:
                 print_acc(f"Error running on_error: {e2}")
             if not args.recover:
-                print_end_message(jobs_completed, jobs_failed)
+                print_end_message(jobs_completed, jobs_failed, jobs_stopped, jobs_queued)
                 raise e
         except KeyboardInterrupt as e:
             try:
@@ -127,7 +148,7 @@ def main():
             except Exception as e2:
                 print_acc(f"Error running on_error: {e2}")
             if not args.recover:
-                print_end_message(jobs_completed, jobs_failed)
+                print_end_message(jobs_completed, jobs_failed, jobs_stopped, jobs_queued)
                 raise e
 
 

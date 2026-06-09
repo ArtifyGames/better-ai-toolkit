@@ -335,6 +335,9 @@ class Wan21(BaseModel):
     def get_bucket_divisibility(self):
         return 16
 
+    def supports_text_encoder_load_skip(self) -> bool:
+        return True
+
     # static method to get the scheduler
     @staticmethod
     def get_train_scheduler():
@@ -416,31 +419,38 @@ class Wan21(BaseModel):
 
         flush()
 
-        self.print_and_status_update("Loading UMT5EncoderModel")
-        
-        tokenizer, text_encoder = get_umt5_encoder(
-            model_path=te_path,
-            tokenizer_subfolder="tokenizer",
-            encoder_subfolder="text_encoder",
-            torch_dtype=dtype,
-            comfy_files=self._comfy_te_file
-        )
-
-        text_encoder.to(self.device_torch, dtype=dtype)
-        flush()
-
-        if self.model_config.quantize_te:
-            self.print_and_status_update("Quantizing UMT5EncoderModel")
-            quantize(text_encoder, weights=get_qtype(self.model_config.qtype))
-            freeze(text_encoder)
-            flush()
-        
-        if self.model_config.layer_offloading and self.model_config.layer_offloading_text_encoder_percent > 0:
-            MemoryManager.attach(
-                text_encoder,
-                self.device_torch,
-                offload_percent=self.model_config.layer_offloading_text_encoder_percent
+        if self.model_config.skip_text_encoder_load:
+            self.print_and_status_update(
+                "Skipping text encoder load; cached text embeddings will be used"
             )
+            tokenizer = None
+            text_encoder = None
+        else:
+            self.print_and_status_update("Loading UMT5EncoderModel")
+
+            tokenizer, text_encoder = get_umt5_encoder(
+                model_path=te_path,
+                tokenizer_subfolder="tokenizer",
+                encoder_subfolder="text_encoder",
+                torch_dtype=dtype,
+                comfy_files=self._comfy_te_file
+            )
+
+            text_encoder.to(self.device_torch, dtype=dtype)
+            flush()
+
+            if self.model_config.quantize_te:
+                self.print_and_status_update("Quantizing UMT5EncoderModel")
+                quantize(text_encoder, weights=get_qtype(self.model_config.qtype))
+                freeze(text_encoder)
+                flush()
+
+            if self.model_config.layer_offloading and self.model_config.layer_offloading_text_encoder_percent > 0:
+                MemoryManager.attach(
+                    text_encoder,
+                    self.device_torch,
+                    offload_percent=self.model_config.layer_offloading_text_encoder_percent
+                )
 
         if self.model_config.low_vram:
             print("Moving transformer back to GPU")
@@ -479,9 +489,10 @@ class Wan21(BaseModel):
         pipe.transformer = pipe.transformer.to(self.device_torch)
 
         flush()
-        text_encoder.to(self.device_torch)
-        text_encoder.requires_grad_(False)
-        text_encoder.eval()
+        if text_encoder is not None:
+            text_encoder.to(self.device_torch)
+            text_encoder.requires_grad_(False)
+            text_encoder.eval()
         pipe.transformer = pipe.transformer.to(self.device_torch)
         flush()
         self.pipeline = pipe
