@@ -80,10 +80,10 @@ class SDTrainer(BaseSDTrainProcess):
         self.cached_blank_embeds: Optional[PromptEmbeds] = None
         self.cached_trigger_embeds: Optional[PromptEmbeds] = None
         self.diff_output_preservation_embeds: Optional[PromptEmbeds] = None
-        
+
         self.dfe: Optional[DiffusionFeatureExtractor] = None
         self.unconditional_embeds = None
-        
+
         if self.train_config.diff_output_preservation:
             if self.trigger_word is None:
                 raise ValueError("diff_output_preservation requires a trigger_word to be set")
@@ -91,15 +91,15 @@ class SDTrainer(BaseSDTrainProcess):
                 raise ValueError("diff_output_preservation requires a network to be set")
             if self.train_config.train_text_encoder:
                 raise ValueError("diff_output_preservation is not supported with train_text_encoder")
-        
+
         if self.train_config.blank_prompt_preservation:
             if self.network_config is None:
                 raise ValueError("blank_prompt_preservation requires a network to be set")
-        
+
         if self.train_config.blank_prompt_preservation or self.train_config.diff_output_preservation:
             # always do a prior prediction when doing output preservation
             self.do_prior_prediction = True
-        
+
         # store the loss target for a batch so we can use it in a loss
         self._guidance_loss_target_batch: float = 0.0
         if isinstance(self.train_config.guidance_loss_target, (int, float)):
@@ -112,7 +112,7 @@ class SDTrainer(BaseSDTrainProcess):
 
     def before_model_load(self):
         pass
-    
+
     def cache_sample_prompts(self):
         if self.train_config.disable_sampling:
             return
@@ -135,15 +135,15 @@ class SDTrainer(BaseSDTrainProcess):
                     ctrl_img_2=sample_item.ctrl_img_2,
                     ctrl_img_3=sample_item.ctrl_img_3,
                 )
-                
+
                 has_control_images = False
                 if gen_img_config.ctrl_img is not None or gen_img_config.ctrl_img_1 is not None or gen_img_config.ctrl_img_2 is not None or gen_img_config.ctrl_img_3 is not None:
                     has_control_images = True
                 # see if we need to encode the control images
                 if self.sd.encode_control_in_text_embeddings and has_control_images:
-                    
+
                     ctrl_img_list = []
-                    
+
                     if gen_img_config.ctrl_img is not None:
                         ctrl_img = Image.open(gen_img_config.ctrl_img).convert("RGB")
                         # convert to 0 to 1 tensor
@@ -153,7 +153,7 @@ class SDTrainer(BaseSDTrainProcess):
                             .to(self.sd.device_torch, dtype=self.sd.torch_dtype)
                         )
                         ctrl_img_list.append(ctrl_img)
-                    
+
                     if gen_img_config.ctrl_img_1 is not None:
                         ctrl_img_1 = Image.open(gen_img_config.ctrl_img_1).convert("RGB")
                         # convert to 0 to 1 tensor
@@ -181,13 +181,13 @@ class SDTrainer(BaseSDTrainProcess):
                             .to(self.sd.device_torch, dtype=self.sd.torch_dtype)
                         )
                         ctrl_img_list.append(ctrl_img_3)
-                    
+
                     if self.sd.has_multiple_control_images:
                         ctrl_img = ctrl_img_list
                     else:
                         ctrl_img = ctrl_img_list[0] if len(ctrl_img_list) > 0 else None
-                    
-                    
+
+
                     positive = self.sd.encode_prompt(
                         gen_img_config.prompt,
                         control_images=ctrl_img
@@ -199,12 +199,12 @@ class SDTrainer(BaseSDTrainProcess):
                 else:
                     positive = self.sd.encode_prompt(gen_img_config.prompt).to('cpu')
                     negative = self.sd.encode_prompt(gen_img_config.negative_prompt).to('cpu')
-                
+
                 self.sd.sample_prompts_cache.append({
                     'conditional': positive,
                     'unconditional': negative
                 })
-        
+
 
     def before_dataset_load(self):
         self.assistant_adapter = None
@@ -269,7 +269,7 @@ class SDTrainer(BaseSDTrainProcess):
                     self.device_torch,
                     dtype=self.sd.torch_dtype
                 ).detach()
-        
+
         if self.train_config.do_prior_divergence:
             self.do_prior_prediction = True
         # move vae to device if we did not cache latents
@@ -360,13 +360,13 @@ class SDTrainer(BaseSDTrainProcess):
                 self.device_torch,
                 dtype=self.sd.torch_dtype
             ).detach()
-        
+
         if self.train_config.diffusion_feature_extractor_path is not None:
             vae = self.sd.vae
             # if not (self.model_config.arch in ["flux"]) or self.sd.vae.__class__.__name__ == "AutoencoderPixelMixer":
             #     vae = self.sd.vae
             self.dfe = load_dfe(
-                self.train_config.diffusion_feature_extractor_path, 
+                self.train_config.diffusion_feature_extractor_path,
                 vae=vae,
                 sd=self.sd
             )
@@ -376,10 +376,10 @@ class SDTrainer(BaseSDTrainProcess):
                 self.dfe.vision_encoder.train()
                 self.dfe.vision_encoder.gradient_checkpointing = True
             elif hasattr(self.dfe, 'model') and self.train_config.gradient_checkpointing:
-                if hasattr(self.dfe.model, 'enable_gradient_checkpointing'): 
+                if hasattr(self.dfe.model, 'enable_gradient_checkpointing'):
                     self.dfe.model.train()
                     self.dfe.model.enable_gradient_checkpointing()
-                if hasattr(self.dfe.model, 'gradient_checkpointing_enable'): 
+                if hasattr(self.dfe.model, 'gradient_checkpointing_enable'):
                     self.dfe.model.train()
                     self.dfe.model.gradient_checkpointing_enable()
                 elif hasattr(self.dfe.model, 'gradient_checkpointing'):
@@ -389,7 +389,7 @@ class SDTrainer(BaseSDTrainProcess):
                     print_acc("Warning: Could not enable gradient checkpointing on diffusion feature extractor model.")
             else:
                 self.dfe.eval()
-                
+
             # enable gradient checkpointing on the vae
             if vae is not None and self.train_config.gradient_checkpointing:
                 try:
@@ -562,26 +562,26 @@ class SDTrainer(BaseSDTrainProcess):
                         # video B,C,T,H,W
                         lat_height = batch.latents.shape[3]
                         lat_width = batch.latents.shape[4]
-                    else: 
+                    else:
                         lat_height = batch.latents.shape[2]
                         lat_width = batch.latents.shape[3]
                     # resize to size of noise_pred
                     prior_mask = torch.nn.functional.interpolate(prior_mask, size=(lat_height, lat_width), mode='bicubic')
                     # stack first channel to match channels of noise_pred
                     prior_mask = torch.cat([prior_mask[:1]] * noise_pred.shape[1], dim=1)
-                    
+
                     if len(noise_pred.shape) == 5:
                         prior_mask = prior_mask.unsqueeze(2)  # add time dimension back for video
-                        prior_mask = prior_mask.repeat(1, 1, noise_pred.shape[2], 1, 1) 
+                        prior_mask = prior_mask.repeat(1, 1, noise_pred.shape[2], 1, 1)
 
                     prior_mask_multiplier = 1.0 - prior_mask
-                    
+
                     # scale so it is a mean of 1
                     prior_mask_multiplier = prior_mask_multiplier / prior_mask_multiplier.mean()
                 if hasattr(self.sd, 'get_loss_target'):
                     target = self.sd.get_loss_target(
-                        noise=noise, 
-                        batch=batch, 
+                        noise=noise,
+                        batch=batch,
                         timesteps=timesteps,
                     ).detach()
                 elif self.sd.is_flow_matching:
@@ -608,11 +608,11 @@ class SDTrainer(BaseSDTrainProcess):
                 target = target.detach()
         elif hasattr(self.sd, 'get_loss_target'):
             target = self.sd.get_loss_target(
-                noise=noise, 
-                batch=batch, 
+                noise=noise,
+                batch=batch,
                 timesteps=timesteps,
             ).detach()
-            
+
         elif self.sd.is_flow_matching:
             # forward ODE
             target = (noise - batch.latents).detach()
@@ -620,7 +620,7 @@ class SDTrainer(BaseSDTrainProcess):
             # target = (batch.latents - noise).detach()
         else:
             target = noise
-            
+
         if self.dfe is not None:
             if self.dfe.version == 1:
                 model = self.sd
@@ -640,14 +640,14 @@ class SDTrainer(BaseSDTrainProcess):
                         self.sd.noise_scheduler._step_index = None
                         self.sd.noise_scheduler._init_step_index(timestep)
                         sample = noisy_latent_chunks[idx].to(torch.float32)
-                        
+
                         sigma = self.sd.noise_scheduler.sigmas[self.sd.noise_scheduler.step_index]
                         sigma_next = self.sd.noise_scheduler.sigmas[-1] # use last sigma for final step
                         prev_sample = sample + (sigma_next - sigma) * model_output
                         stepped_chunks.append(prev_sample)
-                    
+
                     stepped_latents = torch.cat(stepped_chunks, dim=0)
-                    
+
                 stepped_latents = stepped_latents.to(self.sd.vae.device, dtype=self.sd.vae.dtype)
                 sl = stepped_latents
                 if len(sl.shape) == 5:
@@ -667,7 +667,7 @@ class SDTrainer(BaseSDTrainProcess):
                     target_features = self.dfe(bl.float())
                     # scale dfe so it is weaker at higher noise levels
                     dfe_scaler = 1 - (timesteps.float() / 1000.0).view(-1, 1, 1, 1).to(self.device_torch)
-                
+
                 dfe_loss = torch.nn.functional.mse_loss(pred_features, target_features, reduction="none") * \
                     self.train_config.diffusion_feature_extractor_weight * dfe_scaler
                 additional_loss += dfe_loss.mean()
@@ -677,14 +677,14 @@ class SDTrainer(BaseSDTrainProcess):
                 with torch.no_grad():
                     rectified_flow_target = noise.float() - batch.latents.float()
                     target_feature_list = self.dfe(torch.cat([rectified_flow_target, noise.float()], dim=1))
-                
+
                 # do diffusion feature extraction on prediction
                 pred_feature_list = self.dfe(torch.cat([noise_pred.float(), noise.float()], dim=1))
-                
+
                 dfe_loss = 0.0
                 for i in range(len(target_feature_list)):
                     dfe_loss += torch.nn.functional.mse_loss(pred_feature_list[i], target_feature_list[i], reduction="mean")
-                
+
                 additional_loss += dfe_loss * self.train_config.diffusion_feature_extractor_weight * 100.0
             elif self.dfe.version in [3, 4, 5, 6, 7, 8, 9, 10]:
                 dfe_loss = self.dfe(
@@ -695,10 +695,10 @@ class SDTrainer(BaseSDTrainProcess):
                     batch=batch,
                     scheduler=self.sd.noise_scheduler
                 )
-                additional_loss += dfe_loss * self.train_config.diffusion_feature_extractor_weight 
+                additional_loss += dfe_loss * self.train_config.diffusion_feature_extractor_weight
             else:
                 raise ValueError(f"Unknown diffusion feature extractor version {self.dfe.version}")
-        
+
         if self.train_config.do_guidance_loss:
             with torch.no_grad():
                 # we make cached blank prompt embeds that match the batch size
@@ -713,7 +713,7 @@ class SDTrainer(BaseSDTrainProcess):
                     batch=batch,
                 )
                 is_video = len(target.shape) == 5
-                
+
                 if self.train_config.do_guidance_loss_cfg_zero:
                     # zero cfg
                     # ref https://github.com/WeichenFan/CFG-Zero-star/blob/cdac25559e3f16cb95f0016c04c709ea1ab9452b/wan_pipeline.py#L557
@@ -728,7 +728,7 @@ class SDTrainer(BaseSDTrainProcess):
                     st_star = dot_product / squared_norm
 
                     alpha = st_star
-                    
+
                     alpha = alpha.view(batch_size, 1, 1, 1) if not is_video else alpha.view(batch_size, 1, 1, 1, 1)
                 else:
                     alpha = 1.0
@@ -737,7 +737,7 @@ class SDTrainer(BaseSDTrainProcess):
                 if isinstance(guidance_scale, list):
                     guidance_scale = torch.tensor(guidance_scale).to(target.device, dtype=target.dtype)
                     guidance_scale = guidance_scale.view(-1, 1, 1, 1) if not is_video else guidance_scale.view(-1, 1, 1, 1, 1)
-                
+
                 unconditional_target = unconditional_target * alpha
                 target = unconditional_target + guidance_scale * (target - unconditional_target)
 
@@ -745,7 +745,7 @@ class SDTrainer(BaseSDTrainProcess):
                 with torch.no_grad():
                     guidance_scale = self.train_config.differential_guidance_scale
                     target = noise_pred + guidance_scale * (target - noise_pred)
-            
+
         if target is None:
             target = noise
 
@@ -799,10 +799,10 @@ class SDTrainer(BaseSDTrainProcess):
                         tv = tv.unsqueeze(-1)
                         # min 0.001
                         tv = torch.clamp(tv, min=0.001)
-                
+
                 # step latent, use here or with do_fft_loss
                 t0 = noisy_latents - tv * noise_pred
-                
+
                 if self.train_config.t0_loss_target:
                     # replace the loss targets and pred
                     target = batch.latents.detach()
@@ -811,7 +811,7 @@ class SDTrainer(BaseSDTrainProcess):
                     if self.train_config.t0_velocity_equiv_weight:
                         velocity_equiv_weight = (1.0 / torch.clamp(tv, min=0.1) ** 2)
                         local_loss_scale = velocity_equiv_weight
-                        
+
                 if self.train_config.do_fft_loss:
                     with torch.no_grad():
                         target_mag = torch.fft.rfft2(batch.latents.to(t0.device).float(), norm="ortho").abs()
@@ -835,9 +835,12 @@ class SDTrainer(BaseSDTrainProcess):
                 loss = loss * 10.0
             else:
                 loss = torch.nn.functional.mse_loss(pred.float(), target.float(), reduction="none")
-            
+
             loss = loss * local_loss_scale
-                
+
+            # apply model specific loss scaling
+            loss = self.sd.scale_loss(loss)
+
             do_weighted_timesteps = False
             if self.sd.is_flow_matching:
                 if self.train_config.linear_timesteps or self.train_config.linear_timesteps2:
@@ -929,7 +932,7 @@ class SDTrainer(BaseSDTrainProcess):
                 loss = apply_snr_weight(loss, timesteps, self.sd.noise_scheduler, self.train_config.min_snr_gamma)
 
         loss = loss.mean()
-        
+
         # check for audio loss
         if batch.audio_pred is not None and batch.audio_target is not None:
             audio_loss = torch.nn.functional.mse_loss(batch.audio_pred.float(), batch.audio_target.float(), reduction="mean")
@@ -950,7 +953,13 @@ class SDTrainer(BaseSDTrainProcess):
 
 
         loss = loss + additional_loss
-        
+
+        if hasattr(self.sd, "get_additional_loss"):
+            additional_model_loss = self.sd.get_additional_loss(pred, target)
+            if additional_model_loss is not None:
+                loss = loss + additional_model_loss
+                self.additional_logs["additional_model_loss"] = additional_model_loss.item()
+
         if self.train_config.max_loss_debug and self.train_config.max_loss is not None:
             if loss.item() > self.train_config.max_loss:
                 print_acc(f"Loss {loss.item()} is greater than max loss {self.train_config.max_loss}. Clipping to max loss.")
@@ -958,7 +967,7 @@ class SDTrainer(BaseSDTrainProcess):
 
         if self.train_config.max_loss is not None:
             loss = torch.clamp(loss, max=self.train_config.max_loss)
-        
+
         return loss
 
     def preprocess_batch(self, batch: 'DataLoaderBatchDTO'):
@@ -993,8 +1002,8 @@ class SDTrainer(BaseSDTrainProcess):
         )
 
         return loss
-    
-    
+
+
     # ------------------------------------------------------------------
     #  Mean-Flow loss (Geng et al., “Mean Flows for One-step Generative
     #  Modelling”, 2025 – see Alg. 1 + Eq. (6) of the paper)
@@ -1018,7 +1027,7 @@ class SDTrainer(BaseSDTrainProcess):
         total_steps = float(self.sd.noise_scheduler.config.num_train_timesteps)  # e.g. 1000
         base_eps = 1e-3
         min_time_gap = 1e-2
-        
+
         with torch.no_grad():
             num_train_timesteps = self.sd.noise_scheduler.config.num_train_timesteps
             batch_size = batch.latents.shape[0]
@@ -1083,8 +1092,8 @@ class SDTrainer(BaseSDTrainProcess):
         du_dt = (u_perturbed - u_pred).detach() / eps
         # du_dt = (u_perturbed - u_pred).detach()
         du_dt = du_dt.to(dtype)
-        
-        
+
+
         time_gap = (t_frac - r_frac)[:, None, None, None].to(dtype)
         time_gap.clamp(min=1e-4)
         u_shifted = u_pred + time_gap * du_dt
@@ -1093,7 +1102,7 @@ class SDTrainer(BaseSDTrainProcess):
 
         # a step is done like this:
         # stepped_latent = model_input + (timestep_next - timestep) * model_output
-        
+
         # flow target velocity
         # v_target = (noise_sample - latents_clean) / time_gap
         # flux predicts opposite of velocity, so we need to invert it
@@ -1213,7 +1222,7 @@ class SDTrainer(BaseSDTrainProcess):
 
             if unconditional_embeds is not None:
                 unconditional_embeds = unconditional_embeds.to(self.device_torch, dtype=dtype).detach()
-            
+
             guidance_embedding_scale = self.train_config.cfg_scale
             if self.train_config.do_guidance_loss:
                 guidance_embedding_scale = self._guidance_loss_target_batch
@@ -1284,7 +1293,7 @@ class SDTrainer(BaseSDTrainProcess):
             batch=batch,
             **kwargs
         )
-    
+
 
     def train_single_accumulation(self, batch: DataLoaderBatchDTO):
         with torch.no_grad():
@@ -1670,7 +1679,7 @@ class SDTrainer(BaseSDTrainProcess):
                                     dtype=dtype)
                                 if isinstance(self.adapter, CustomAdapter):
                                     self.adapter.is_unconditional_run = False
-                            
+
                             if self.train_config.diff_output_preservation:
                                 dop_prompts = [p.replace(self.trigger_word, self.train_config.diff_output_preservation_class) for p in conditioned_prompts]
                                 dop_prompts_2 = None
@@ -1688,14 +1697,14 @@ class SDTrainer(BaseSDTrainProcess):
                         conditional_embeds = conditional_embeds.detach()
                         if self.train_config.do_cfg:
                             unconditional_embeds = unconditional_embeds.detach()
-                    
+
                     if self.decorator:
                         conditional_embeds.text_embeds = self.decorator(
                             conditional_embeds.text_embeds
                         )
                         if self.train_config.do_cfg:
                             unconditional_embeds.text_embeds = self.decorator(
-                                unconditional_embeds.text_embeds, 
+                                unconditional_embeds.text_embeds,
                                 is_unconditional=True
                             )
 
@@ -1870,7 +1879,7 @@ class SDTrainer(BaseSDTrainProcess):
                         # use diff_output_preservation embeds if doing dfe
                         if self.train_config.diff_output_preservation:
                             prior_embeds_to_use = self.diff_output_preservation_embeds.expand_to_batch(noisy_latents.shape[0])
-                        
+
                         if self.train_config.blank_prompt_preservation:
                             blank_embeds = self.cached_blank_embeds.clone().detach().to(
                                 self.device_torch, dtype=dtype
@@ -1878,7 +1887,7 @@ class SDTrainer(BaseSDTrainProcess):
                             prior_embeds_to_use = concat_prompt_embeds(
                                 [blank_embeds] * noisy_latents.shape[0]
                             )
-                        
+
                         prior_pred = self.get_prior_prediction(
                             noisy_latents=noisy_latents,
                             conditional_embeds=prior_embeds_to_use,
@@ -1948,7 +1957,7 @@ class SDTrainer(BaseSDTrainProcess):
                                 )
                                 pred_kwargs['down_block_additional_residuals'] = down_block_res_samples
                                 pred_kwargs['mid_block_additional_residual'] = mid_block_res_sample
-                
+
                 if self.train_config.do_guidance_loss and isinstance(self.train_config.guidance_loss_target, list):
                     batch_size = noisy_latents.shape[0]
                     # update the guidance value, random float between guidance_loss_target[0] and guidance_loss_target[1]
@@ -1960,7 +1969,7 @@ class SDTrainer(BaseSDTrainProcess):
                     ]
 
                 self.before_unet_predict()
-                
+
                 if unconditional_embeds is not None:
                     unconditional_embeds = unconditional_embeds.to(self.device_torch, dtype=dtype).detach()
                 with self.timer('condition_noisy_latents'):
@@ -1968,15 +1977,15 @@ class SDTrainer(BaseSDTrainProcess):
                     noisy_latents = self.sd.condition_noisy_latents(noisy_latents, batch)
                     if self.adapter and isinstance(self.adapter, CustomAdapter):
                         noisy_latents = self.adapter.condition_noisy_latents(noisy_latents, batch)
-                
+
                 if self.train_config.timestep_type == 'next_sample':
                     with self.timer('next_sample_step'):
                         with torch.no_grad():
-                            
+
                             stepped_timestep_indicies = [self.sd.noise_scheduler.index_for_timestep(t) + 1 for t in timesteps]
                             stepped_timesteps = [self.sd.noise_scheduler.timesteps[x] for x in stepped_timestep_indicies]
                             stepped_timesteps = torch.stack(stepped_timesteps, dim=0)
-                            
+
                             # do a sample at the current timestep and step it, then determine new noise
                             next_sample_pred = self.predict_noise(
                                 noisy_latents=noisy_latents.to(self.device_torch, dtype=dtype),
@@ -2022,7 +2031,7 @@ class SDTrainer(BaseSDTrainProcess):
                         mask_multiplier=mask_multiplier,
                         prior_pred=prior_pred,
                     )
-                    
+
                 elif self.train_config.loss_type == 'mean_flow':
                     loss = self.get_mean_flow_loss(
                         noisy_latents=noisy_latents,
@@ -2057,7 +2066,7 @@ class SDTrainer(BaseSDTrainProcess):
                         doing_preservation = self.train_config.diff_output_preservation or self.train_config.blank_prompt_preservation
                         if doing_preservation and not do_inverted_masked_prior:
                             prior_to_calculate_loss = None
-                        
+
                         loss = self.calculate_loss(
                             noise_pred=noise_pred,
                             noise=noise,
@@ -2067,7 +2076,7 @@ class SDTrainer(BaseSDTrainProcess):
                             mask_multiplier=mask_multiplier,
                             prior_pred=prior_to_calculate_loss,
                         )
-                    
+
                     if self.train_config.diff_output_preservation or self.train_config.blank_prompt_preservation:
                         with torch.no_grad():
                             if self.train_config.diff_output_preservation:
